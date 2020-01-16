@@ -1,0 +1,24 @@
+{
+  "name": "rakonto-express",
+  "version": "1.0.0",
+  "description": "Rakonto API Backend",
+  "main": "rakonto-express",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "GPL-2.0+",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rakonto/rakonto-tools"
+  },
+  "dependencies": {
+    "apicache": "^1.2.0",
+    "cheerio": "^1.0.0-rc.2",
+    "crypto": "^1.0.1",
+    "express": "^4.16.2",
+    "litecore-explorers": "^1.0.1",
+    "litecore-lib": "^0.13.22",
+    "request": "^2.51.0"
+  }
+}

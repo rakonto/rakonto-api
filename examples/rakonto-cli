@@ -1,0 +1,241 @@
+#!/usr/bin/env node
+
+let litecore = require("litecore-explorers").litecore;
+let Insight = require("litecore-explorers").Insight;
+let insight = new Insight('https://explorer.rakonto.net/',"testnet");
+let request = require("request");
+
+const SERVICE_ADDRESS = 'mseL2Hyf8N1dLu1wTMdRgKTVrmJdn5eBoG'; // address we send tx to
+const SERVICE_DUST = 15000; // tiny amount right now
+
+const OP_CHECKMULTISIG = 'ae';
+
+let args = process.argv.slice(1);
+
+function usage()
+{
+    console.log(`Usage:\n\trakonto-cli sendtx <from> <privkey> <hash> <url>`);
+    console.log(`\trakonto-cli url_from_tx <txid>`);
+    console.log(`\trakonto-cli txs_for_url <url>`);
+    process.exit(-1);
+}
+
+function sendtx(from, privkey, hash, url)
+{
+    let mso = url_to_multisig(url);
+    let signkey = new litecore.PrivateKey(privkey, 'testnet');
+    insight.getUtxos(from, (err, utxos) =>
+    {
+        if(err)
+        {
+            console.log(err);
+            return;
+        }
+        let tx = new litecore.Transaction()
+            .from(utxos)
+            .to(SERVICE_ADDRESS, SERVICE_DUST)
+            .addData(hash)
+            .addOutput(mso)
+            .change(from)
+            .sign(signkey);
+        //console.log(tx.toJSON());
+        insight.broadcast(tx, (error, txid) =>
+        {
+            if (error)
+            {
+                console.log(error);
+                return;
+            }
+            console.log('txid: ' + txid);
+        });
+    });
+}
+
+function url_to_multisig(url)
+{
+    let b = Buffer.from(url);
+    let script = new litecore.Script();
+    script.add(litecore.Opcode.smallInt(1));
+    let ha = [];
+    let prefix = new Buffer([0x04]);
+    for(let i=0; i<b.length; i+=64) 
+    {
+        let buf = Buffer.concat([prefix, b.slice(i, i+64)]);
+        if(buf.length < 65)
+        {
+            let pad = Buffer.alloc(65 - buf.length);
+            buf = Buffer.concat([buf, pad]);
+        }
+        ha.push(buf.toString('hex'));
+        script.add(buf);
+    }
+    script.add(litecore.Opcode.smallInt(ha.length));
+    script.add(litecore.Opcode.OP_CHECKMULTISIG);
+    return new litecore.Transaction.Output({script:script, satoshis:1000});
+}
+
+function url_from_script(script)
+{
+    script = new litecore.Script(script); // ensure script is a script object
+    let sba = script.chunks.filter(c => c.buf).map(b => b.buf);
+    sba = sba.map(b => b.slice(1).toString('ascii'));
+    return sba.join('').replace(/[^ -~]+/g, "");
+}
+
+function url_from_tx(txid)
+{
+    insight.getTransaction(txid, (err, tx) => 
+    {
+        if(err)
+        {
+            console.log(err);
+            return;
+        }
+        let mso = tx.vout.find(o => o.scriptPubKey.hex.substr(-2) == OP_CHECKMULTISIG);
+        if(!mso)
+        {
+            console.log("No MultiSig output");
+            return;
+        }
+        console.log("url: " + url_from_script(mso.scriptPubKey.hex));
+    });
+}
+
+/**
+ * Return up to 10 transactions for a given `url`.
+ * Optional parameter `older_than` to load trnsaction older than time (allows paging).
+**/ 
+function txs_for_url(url, older_than)
+{
+    older_than = older_than || Number.MAX_SAFE_INTEGER;
+    let page_size = 10;
+    let results = [];
+
+    // 1. get domain send address(s)
+    // 2. get txs for that send address
+    // 3. filter to txs with multisig
+    // 4. filter to url
+    // 5. load more if needed and can
+    let matches = /(https?:\/\/[^\/]*)/.exec(url);
+    if (matches.length < 2)
+    {
+        console.log("Bad URL");
+        return;
+    }
+    let rkta_url = matches[1] + '/rkta.txt';
+    request(
+    {
+        method: 'GET',
+        url: rkta_url
+    },
+    (err, resp, body) => 
+    {
+        if(err || resp.statusCode !== 200)
+        {
+            console.log("Error loading " + rkta_url);
+            return;
+        }
+        let send_addrs = body;
+
+        function loadNext(from)
+        {
+            let to = from + 50; // 50 is the max results from an Insight seach
+            insight.requestGet('/api/addrs/' + send_addrs + '/txs?from=' + from + '&to=' + to, (err, resp, body) =>
+            {
+                if(err || resp.statusCode !== 200)
+                {
+                    console.log("Error loading " + rkta_url);
+                    return;
+                }
+                let jo = JSON.parse(body);
+                let txs = jo.items;
+                txs = txs.filter(tx => tx.vout.find(o => o.scriptPubKey.hex.substr(-2) == OP_CHECKMULTISIG));
+                txs = txs.filter(tx => tx.time < older_than);
+                txs = txs.filter(tx => 
+                {
+                    let mso = tx.vout.find(o => o.scriptPubKey.hex.substr(-2) == OP_CHECKMULTISIG);
+                    let mso_url = url_from_script(mso.scriptPubKey.hex);
+                    return mso_url == url;
+                });
+                results = results.concat(txs.slice(0, page_size - results.length));
+                if(jo.to === jo.totalItems || results.length === page_size)
+                {
+                    // Either have 10 results or reached max txs so done...
+                    console.log(JSON.stringify(results));
+                    return;
+                }
+                else
+                {
+                    // Recursively load next batch of transactions to search...
+                    loadNext(to);
+                }
+            });
+        }
+
+        // Kick off...
+        loadNext(0);
+    });
+}
+
+function test()
+{
+    let mso = url_to_multisig('https://digitalcommons.augustana.edu/cgi/viewcontent.cgi?article=1000&context=cscfaculty');
+    let signkey = new litecore.PrivateKey(process.env.TEST_LTC_PRIVKEY, 'testnet');
+    insight.getUtxos(process.env.TEST_LTC_ADDR, (err, utxos) =>
+    {
+        if(err)
+        {
+            console.log(err);
+            return;
+        }
+        let tx = new litecore.Transaction()
+            .from(utxos)
+            .to(process.env.TEST_LTC_SERVICE, SERVICE_DUST)
+            .addData("a test")
+            .addOutput(mso)
+            .change(process.env.TEST_LTC_ADDR)
+            .sign(signkey);
+        console.log(tx.toJSON());
+        console.log(url_from_script(tx.outputs[2].script));
+        return;// Don't broadcast
+        insight.broadcast(tx, (error, txid) =>
+        {
+            if (error)
+            {
+                console.log(error);
+                return;
+            }
+            console.log('txid: ' + txid);
+        });
+    });
+}
+
+if(args.length < 2)
+{
+    usage();
+}
+
+switch(args[1])
+{
+    case 'test':
+        test();
+    break;
+    case 'sendtx':
+        if(args.length != 6)
+            return usage();
+        sendtx(args[2], args[3], args[4], args[5]);
+    break;
+    case 'url_from_tx':
+        if(args.length != 3)
+            return usage();
+        url_from_tx(args[2]);
+    break;
+    case 'txs_for_url':
+        if(args.length != 3 && args.length != 4)
+            return usage();
+        txs_for_url(args[2], args[3]);
+    break;
+    default:
+        usage();
+    break;
+}
